@@ -249,18 +249,15 @@ inline void load_correct_actions(std::string file){
   /* nwords=max; */
   /* max++; */
 
+  std::cerr<<"nwords:"<<nwords<<"\n";
   nactions=actions.size();
   std::cerr<<"nactions:"<<nactions<<"\n";
   std::cerr<<"done"<<"\n";
-  for (auto a: actions) {
-    std::cerr<<a<<"\n";
-  }
+  /* for (auto a: actions) { */
+  /*   std::cerr<<a<<"\n"; */
+  /* } */
 
-
-
-  std::cerr<<"nwords:"<<nwords<<"\n";
   std::cerr<<"npos:"<<npos<<"\n";
-
   /* for (unsigned i=0;i<npos;i++){ */
   /*   std::cerr<<i<<":"<<intToPos[i]<<"\n"; */
   /* } */
