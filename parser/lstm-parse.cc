@@ -58,6 +58,9 @@ using namespace cnn;
 using namespace std;
 namespace po = boost::program_options;
 
+map<int, string>bucket2suffix = {{-1, ""}, {0, "0/"}, {1, "1/"}, {2, "2/"}, {3, "3/"}, {4, "4/"}, {5, "5/"}, {6, "6/"}, {7, "7/"}, {8, "8/"}, {9, "9/"}};
+
+
 vector<unsigned> possible_actions;
 unordered_map<unsigned, vector<float>> pretrained;
 
@@ -67,8 +70,10 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
   opts.add_options()
     ("training_data,T", po::value<string>()->required(), "List of Transitions - Training corpus")
     ("dev_data,d", po::value<string>(), "Development corpus")
-    ("test_data,p", po::value<string>()->required(), "Test corpus")
+    ("test_data", po::value<string>()->required(), "Test corpus")
     ("actions_data,a", po::value<string>()->required(), "list of all actions")
+    ("pos_data,p", po::value<string>()->required(), "list of all pos tags")
+    ("vocabulary_data,v", po::value<string>()->required(), "vocabulary of words")
     ("output_root,r", po::value<string>()->required(), "output root folder to dump files")
     ("curriculum,c", po::value<unsigned>()->default_value(1), "curriculum strategy: 1-vanilla(random) 2-sorted 3-onepass 4-babystep, default 1")
     ("epochs,e", po::value<unsigned>()->default_value(10), "number of epochs, default = 10")
@@ -76,7 +81,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
     ("unk_strategy,o", po::value<unsigned>()->default_value(1), "Unknown word strategy: 1 = singletons become UNK with probability unk_prob")
     ("unk_prob,u", po::value<double>()->default_value(0.2), "Probably with which to replace singletons with UNK in training data")
     ("model,m", po::value<string>(), "Load saved model from this file")
-    ("use_pos_tags,P", "make POS tags visible to parser")
+    ("use_pos_tags", "make POS tags visible to parser")
     ("layers", po::value<unsigned>()->default_value(2), "number of LSTM layers")
     ("patience", po::value<unsigned>()->default_value(10), "# of epochs before stopping training")
     ("action_dim", po::value<unsigned>()->default_value(16), "action embedding size")
@@ -109,11 +114,19 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
     }
   }
   if (conf->count("test_data") == 0) {
-    cerr << "Please specify --test_data (-p): this is required.\n";
+    cerr << "Please specify --test_data: this is required.\n";
     exit(1);
   }
   if (conf->count("actions_data") == 0) {
     cerr << "Please specify --actions_data (-a): this is required.\n";
+    exit(1);
+  }
+  if (conf->count("pos_data") == 0) {
+    cerr << "Please specify --pos_data (-p): this is required.\n";
+    exit(1);
+  }
+  if (conf->count("vocabulary_data") == 0) {
+    cerr << "Please specify --vocabulary_data (-v): this is required.\n";
     exit(1);
   }
   if (conf->count("output_root") == 0) {
@@ -126,6 +139,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
   }
 }
 
+/************************************************************************/
 struct ParserBuilder {
 
   LSTMBuilder stack_lstm; // (layers, input, hidden, trainer)
@@ -191,71 +205,71 @@ struct ParserBuilder {
     }
   }
 
-static bool IsActionForbidden(const string& a, unsigned bsize, unsigned ssize, const vector<int>& stacki) {
-  if (a[1]=='W' && ssize<3) return true;
-  if (a[1]=='W') {
-        int top=stacki[stacki.size()-1];
-        int sec=stacki[stacki.size()-2];
-        if (sec>top) return true;
-  }
+  static bool IsActionForbidden(const string& a, unsigned bsize, unsigned ssize, const vector<int>& stacki) {
+    if (a[1]=='W' && ssize<3) return true;
+    if (a[1]=='W') {
+      int top=stacki[stacki.size()-1];
+      int sec=stacki[stacki.size()-2];
+      if (sec>top) return true;
+    }
 
-  bool is_shift = (a[0] == 'S' && a[1]=='H');
-  bool is_reduce = !is_shift;
-  if (is_shift && bsize == 1) return true;
-  if (is_reduce && ssize < 3) return true;
-  if (bsize == 2 && // ROOT is the only thing remaining on buffer
-      ssize > 2 && // there is more than a single element on the stack
-      is_shift) return true;
-  // only attach left to ROOT
-  if (bsize == 1 && ssize == 3 && a[0] == 'R') return true;
-  return false;
-}
+    bool is_shift = (a[0] == 'S' && a[1]=='H');
+    bool is_reduce = !is_shift;
+    if (is_shift && bsize == 1) return true;
+    if (is_reduce && ssize < 3) return true;
+    if (bsize == 2 && // ROOT is the only thing remaining on buffer
+	ssize > 2 && // there is more than a single element on the stack
+	is_shift) return true;
+    // only attach left to ROOT
+    if (bsize == 1 && ssize == 3 && a[0] == 'R') return true;
+    return false;
+  }
 
 // take a vector of actions and return a parse tree (labeling of every
 // word position with its head's position)
-static map<int,int> compute_heads(unsigned sent_len, const vector<unsigned>& actions, const vector<string>& setOfActions, map<int,string>* pr = nullptr) {
-  map<int,int> heads;
-  map<int,string> r;
-  map<int,string>& rels = (pr ? *pr : r);
-  for(unsigned i=0;i<sent_len;i++) { heads[i]=-1; rels[i]="ERROR"; }
-  vector<int> bufferi(sent_len + 1, 0), stacki(1, -999);
-  for (unsigned i = 0; i < sent_len; ++i)
-    bufferi[sent_len - i] = i;
-  bufferi[0] = -999;
-  for (auto action: actions) { // loop over transitions for sentence
-    const string& actionString=setOfActions[action];
-    const char ac = actionString[0];
-    const char ac2 = actionString[1];
-    if (ac =='S' && ac2=='H') {  // SHIFT
+  static map<int,int> compute_heads(unsigned sent_len, const vector<unsigned>& actions, const vector<string>& setOfActions, map<int,string>* pr = nullptr) {
+    map<int,int> heads;
+    map<int,string> r;
+    map<int,string>& rels = (pr ? *pr : r);
+    for(unsigned i=0;i<sent_len;i++) { heads[i]=-1; rels[i]="ERROR"; }
+    vector<int> bufferi(sent_len + 1, 0), stacki(1, -999);
+    for (unsigned i = 0; i < sent_len; ++i)
+      bufferi[sent_len - i] = i;
+    bufferi[0] = -999;
+    for (auto action: actions) { // loop over transitions for sentence
+      const string& actionString=setOfActions[action];
+      const char ac = actionString[0];
+      const char ac2 = actionString[1];
+      if (ac =='S' && ac2=='H') {  // SHIFT
       assert(bufferi.size() > 1); // dummy symbol means > 1 (not >= 1)
       stacki.push_back(bufferi.back());
       bufferi.pop_back();
-    } else if (ac=='S' && ac2=='W') { // SWAP
-      assert(stacki.size() > 2);
-      unsigned ii = 0, jj = 0;
-      jj = stacki.back();
-      stacki.pop_back();
-      ii = stacki.back();
-      stacki.pop_back();
-      bufferi.push_back(ii);
-      stacki.push_back(jj);
-    } else { // LEFT or RIGHT
-      assert(stacki.size() > 2); // dummy symbol means > 2 (not >= 2)
-      assert(ac == 'L' || ac == 'R');
-      unsigned depi = 0, headi = 0;
-      (ac == 'R' ? depi : headi) = stacki.back();
-      stacki.pop_back();
-      (ac == 'R' ? headi : depi) = stacki.back();
+      } else if (ac=='S' && ac2=='W') { // SWAP
+	assert(stacki.size() > 2);
+	unsigned ii = 0, jj = 0;
+	jj = stacki.back();
+	stacki.pop_back();
+	ii = stacki.back();
+	stacki.pop_back();
+	bufferi.push_back(ii);
+	stacki.push_back(jj);
+      } else { // LEFT or RIGHT
+	assert(stacki.size() > 2); // dummy symbol means > 2 (not >= 2)
+	assert(ac == 'L' || ac == 'R');
+	unsigned depi = 0, headi = 0;
+	(ac == 'R' ? depi : headi) = stacki.back();
+	stacki.pop_back();
+	(ac == 'R' ? headi : depi) = stacki.back();
       stacki.pop_back();
       stacki.push_back(headi);
       heads[depi] = headi;
       rels[depi] = actionString;
+      }
     }
-  }
-  assert(bufferi.size() == 1);
-  //assert(stacki.size() == 2);
+    assert(bufferi.size() == 1);
+    //assert(stacki.size() == 2);
   return heads;
-}
+  }
 
 // *** if correct_actions is empty, this runs greedy decoding ***
 // returns parse actions for input sentence (in training just returns the reference)
@@ -263,17 +277,17 @@ static map<int,int> compute_heads(unsigned sent_len, const vector<unsigned>& act
 //               sent will have words replaced by appropriate UNK tokens
 // this lets us use pretrained embeddings, when available, for words that were OOV in the
 // parser training data
-vector<unsigned> log_prob_parser(ComputationGraph* hg,
-                     const vector<unsigned>& raw_sent,  // raw sentence
-                     const vector<unsigned>& sent,  // sent with oovs replaced
-                     const vector<unsigned>& sentPos,
-                     const vector<unsigned>& correct_actions,
-                     const vector<string>& setOfActions,
-                     const map<unsigned, std::string>& intToWords,
-                     double *right) {
+  vector<unsigned> log_prob_parser(ComputationGraph* hg,
+				   const vector<unsigned>& raw_sent,  // raw sentence
+				   const vector<unsigned>& sent,  // sent with oovs replaced
+				   const vector<unsigned>& sentPos,
+				   const vector<unsigned>& correct_actions,
+				   const vector<string>& setOfActions,
+				   const map<unsigned, std::string>& intToWords,
+				   double *right) {
     vector<unsigned> results;
     const bool build_training_graph = correct_actions.size() > 0;
-
+    
     stack_lstm.new_graph(*hg);
     buffer_lstm.new_graph(*hg);
     action_lstm.new_graph(*hg);
@@ -456,6 +470,7 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
     return results;
   }
 };
+/************************************************************************/
 
 void signal_callback_handler(int /* signum */) {
   if (requested_stop) {
@@ -477,8 +492,6 @@ unsigned compute_correct(const map<int,int>& ref, const map<int,int>& hyp, unsig
   }
   return res;
 }
-
-
 
 void output_conll(const vector<unsigned>& sentence, const vector<unsigned>& pos,
                   const vector<string>& sentenceUnkStrings, 
@@ -530,15 +543,16 @@ void output_conll(const vector<unsigned>& sentence, const vector<unsigned>& pos,
   outputFile << endl;
 }
 
-void predict(ofstream& testConllFile, ParserBuilder& parser, cpyp::Corpus& corpus, set<unsigned>& training_vocab, po::variables_map& conf, bool conll_option, bool dev_option);
+void predict(ofstream& testConllFile, ParserBuilder& parser, cpyp::Corpus& corpus, po::variables_map& conf, bool conll_option, bool dev_option);
 
 int main(int argc, char** argv) {
   cnn::Initialize(argc, argv);
 
-  cerr << "COMMAND:"; 
+  cerr << "COMMAND:";
   for (unsigned i = 0; i < static_cast<unsigned>(argc); ++i) cerr << ' ' << argv[i];
   cerr << endl;
-  unsigned status_every_i_iterations = 1000;
+
+  unsigned status_every_i_iterations;
 
   po::variables_map conf;
   InitCommandLine(argc, argv, &conf);
@@ -566,6 +580,8 @@ int main(int argc, char** argv) {
   const double unk_prob = conf["unk_prob"].as<double>();
   assert(unk_prob >= 0.); assert(unk_prob <= 1.);
 
+
+  // handle filenames
   stringstream dir_root, param_file, file_root, dev_out_file, test_out_file, log_file;
 
   file_root << ROOT_FOLDER << "/"
@@ -582,16 +598,13 @@ int main(int argc, char** argv) {
   param_file << file_root.str() + "params";
   log_file << file_root.str() + "log";
 
-  int best_correct_heads = 0;
   const string fname = param_file.str();
 
-  cerr << "Writing parameters to file: " << fname << endl;
-  bool softlinkCreated = false;
-  corpus.load_all_actions(conf["actions_data"].as<string>());
-  cerr << "loading training data from : " << conf["training_data"].as<string>() + "trn.oracle" << endl;
-  corpus.load_correct_actions(conf["training_data"].as<string>() + "trn.oracle");
-  //  cerr << "loading training data from : " << conf["training_data"].as<string>() << endl;
-  //  corpus.load_correct_actions(conf["training_data"].as<string>());
+  cerr << "Will be Writing stuff to file: " << file_root.str() << "*" << endl;
+
+  corpus.load_all_pos(conf["pos_data"].as<string>());
+  corpus.load_all_voc(conf["vocabulary_data"].as<string>());
+  corpus.load_all_act(conf["actions_data"].as<string>());
 
   const unsigned kUNK = corpus.get_or_add_word(cpyp::Corpus::UNK);
   kROOT_SYMBOL = corpus.get_or_add_word(ROOT_SYMBOL);
@@ -613,23 +626,14 @@ int main(int argc, char** argv) {
     }
   }
 
-  set<unsigned> training_vocab; // words available in the training corpus
-  set<unsigned> singletons;
-  {  // compute the singletons in the parser's training data
-    map<unsigned, unsigned> counts;
-    for (auto sent : corpus.sentences)
-      for (auto word : sent.second) { training_vocab.insert(word); counts[word]++; }
-    for (auto wc : counts)
-      if (wc.second == 1) singletons.insert(wc.first);
-  }
-
-  cerr << "Number of words: " << corpus.nwords << endl;
   VOCAB_SIZE = corpus.nwords + 1;
   ACTION_SIZE = corpus.nactions + 1;
-  POS_SIZE = corpus.npos + 10;  // bad way of dealing with the fact that we may see new POS tags in the test set
+  POS_SIZE = corpus.npos + 1;
+  cerr << "V: " << VOCAB_SIZE << " A:" << ACTION_SIZE << " P:" << POS_SIZE << endl;
   possible_actions.resize(corpus.nactions);
   for (unsigned i = 0; i < corpus.nactions; ++i)
     possible_actions[i] = i;
+
 
   Model model;
   ParserBuilder parser(&model, pretrained);
@@ -639,9 +643,17 @@ int main(int argc, char** argv) {
     ia >> model;
   }
 
-  // OOV words will be replaced by UNK tokens
-  corpus.load_correct_actionsDev(conf["dev_data"].as<string>());
+  int n_buckets = -1, bucket = -1;
+  if(REGIMEN >= 3){
+    n_buckets = 10;
+    bucket = 0;
+  }
+
   //TRAINING
+  cerr << "loading training data from : " << conf["training_data"].as<string>() + "trn.oracle" << endl;
+  corpus.load_correct_actions(conf["training_data"].as<string>() + "trn.oracle");
+  corpus.load_correct_actionsDev(conf["dev_data"].as<string>());
+
   static unsigned patience = 0;
   if (conf.count("train")) {
     signal(SIGINT, signal_callback_handler);
@@ -669,9 +681,9 @@ int main(int argc, char** argv) {
     double dev_uas = 0;
 
     bool first = true;
-    int iter = 1;
+    unsigned iter = 1;
     time_t time_start = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-    cerr << "TRAINING STARTED AT: " << put_time(localtime(&time_start), "%c %Z") << " for " << EPOCHS << " epochs.."<<endl;
+    cerr << "TRAINING bucket " << bucket <<" STARTED AT: " << put_time(localtime(&time_start), "%c %Z") << " for " << EPOCHS << " epochs.."<<endl;
     int best_uas = 0;
 
     while(!requested_stop and iter <= EPOCHS) {
@@ -685,7 +697,7 @@ int main(int argc, char** argv) {
            vector<unsigned> tsentence=sentence;
            if (unk_strategy == 1) {
              for (auto& w : tsentence)
-               if (singletons.count(w) && cnn::rand01() < unk_prob) w = kUNK;
+               if (corpus.singletons.count(w) && cnn::rand01() < unk_prob) w = kUNK;
            }
 	   const vector<unsigned>& sentencePos=corpus.sentencesPos[order[si]];
 	   const vector<unsigned>& actions=corpus.correct_act_sent[order[si]];
@@ -729,7 +741,7 @@ int main(int argc, char** argv) {
 	const vector<string>& sentenceUnkStr=corpus.sentencesStrDev[sii];  //
 	vector<unsigned> tsentence=sentence;
 	for (auto& w : tsentence)
-	  if (training_vocab.count(w) == 0) w = kUNK;
+	  if (corpus.training_vocab.count(w) == 0) w = kUNK;
 
 	ComputationGraph hg;
 	vector<unsigned> pred = parser.log_prob_parser(&hg,sentence,tsentence,sentencePos,vector<unsigned>(),corpus.actions,corpus.intToWords,&dev_right);
@@ -758,37 +770,31 @@ int main(int argc, char** argv) {
 	ofstream out(fname);
 	boost::archive::text_oarchive oa(out);
 	oa << model;
-	// Create a soft link to the most recent model in order to make it
-	// easier to refer to it in a shell script.
-	if (!softlinkCreated) {
-	  string softlink = " latest_model";
-	  if (system((string("rm -f ") + softlink).c_str()) == 0 && 
-	      system((string("ln -s ") + fname + softlink).c_str()) == 0) {
-	    cerr << "Created " << softlink << " as a soft link to " << fname 
-		 << " for convenience." << endl;
-	  }
-	  softlinkCreated = true;
 	}
+	patience++;
+	if (patience == PATIENCE){
+	  cerr << "no improvement in " << PATIENCE << " epochs. stopping training..." << endl;
+	  break;
+	}
+	++iter;
       }
-      patience++;
-      if (patience == PATIENCE){
-	cerr << "no improvement in " << PATIENCE << " epochs. stopping training..." << endl;
-	break;
-      }
-      ++iter;
-    }
+    //      bucket++;
+    //  if(bucket >= n_buckets) break;
+    //  cerr << "loading training data from : " << conf["training_data"].as<string>() << bucket2suffix[bucket] + "trn.oracle" << endl;
+  // OOV words will be replaced by UNK tokens
+    //   corpus.load_correct_actions(conf["training_data"].as<string>() + bucket2suffix[bucket] + "trn.oracle");
     logFile.close();
     test_out_file << file_root.str() << "dev.pred.conll";
     ofstream devConllFile(test_out_file.str());
-    predict(devConllFile, parser, corpus, training_vocab, conf, true, false);
+    predict(devConllFile, parser, corpus, conf, true, false);
   } // should do training?
   test_out_file.str("");
   test_out_file << file_root.str() << "test.pred.conll";
   ofstream testConllFile(test_out_file.str());
-  predict(testConllFile, parser, corpus, training_vocab, conf, true, true);
+  predict(testConllFile, parser, corpus, conf, true, true);
 }
 
-void predict(ofstream& testConllFile, ParserBuilder& parser, cpyp::Corpus& corpus, set<unsigned>& training_vocab, po::variables_map& conf, bool conll_option, bool dev_option){
+void predict(ofstream& testConllFile, ParserBuilder& parser, cpyp::Corpus& corpus, po::variables_map& conf, bool conll_option, bool dev_option){
 
   if(dev_option){
     cerr << conf["test_data"].as<string>() << " is loading for prediction..." << endl;
@@ -816,7 +822,7 @@ void predict(ofstream& testConllFile, ParserBuilder& parser, cpyp::Corpus& corpu
       const vector<unsigned>& actions=corpus.correct_act_sentDev[sii];
       vector<unsigned> tsentence=sentence;
       for (auto& w : tsentence)
-        if (training_vocab.count(w) == 0) w = kUNK;
+        if (corpus.training_vocab.count(w) == 0) w = kUNK;
       ComputationGraph cg;
       double lp = 0;
       vector<unsigned> pred;

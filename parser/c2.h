@@ -53,6 +53,10 @@ public:
    std::map<std::string, unsigned> charsToInt;
    std::map<unsigned, std::string> intToChars;
 
+   std::set<unsigned> training_vocab;
+   std::set<unsigned> singletons;
+   std::map<unsigned, unsigned> counts;
+
    // String literals
    static constexpr const char* UNK = "UNK";
    static constexpr const char* BAD0 = "<BAD0>";
@@ -81,7 +85,7 @@ inline unsigned UTF8Len(unsigned char x) {
   else return 0;
 }
 
-inline void load_all_actions(std::string file){
+inline void load_all_act(std::string file){
 
   std::ifstream actionsFile(file);
   std::string lineS;
@@ -90,7 +94,8 @@ inline void load_all_actions(std::string file){
     	actions.push_back(lineS);
   }
 
-  /* nactions=actions.size(); */
+  nactions=actions.size();
+
   /* std::cerr<<"nactions:"<<nactions<<"\n"; */
   /* std::cerr<<"done"<<"\n"; */
   /* for (auto a: actions) { */
@@ -99,32 +104,93 @@ inline void load_all_actions(std::string file){
   actionsFile.close();
 }
 
+inline void load_all_pos(std::string file){
+
+  std::ifstream posFile(file);
+  std::string lineS;
+  assert(maxPos == 0);
+  maxPos=1;
+
+  while (getline(posFile, lineS)){
+    if (posToInt[lineS] == 0) {
+      posToInt[lineS] = maxPos;
+      intToPos[maxPos] = lineS;
+      npos = maxPos;
+      maxPos++;
+    }
+  }
+  posFile.close();
+}
+
+inline void load_all_voc(std::string file){
+
+  wordsToInt[Corpus::BAD0] = 0;
+  intToWords[0] = Corpus::BAD0;
+  wordsToInt[Corpus::UNK] = 1; // unknown symbol
+  intToWords[1] = Corpus::UNK;
+  assert(max == 0);
+  max=2;
+
+  charsToInt[BAD0]=1;
+  intToChars[1]="BAD0";
+  maxChars=1;
+
+  std::ifstream vocFile(file);
+  std::string word;
+  unsigned index;
+  while (getline(vocFile, word)){
+          // new word
+
+    if (wordsToInt[word] == 0) {
+      wordsToInt[word] = max;
+      intToWords[max] = word;
+      nwords = max;
+      max++;
+
+      unsigned j = 0;
+      while(j < word.length()) {
+	std::string wj = "";
+	for (unsigned h = j; h < j + UTF8Len(word[j]); h++) {
+	  wj += word[h];
+	}
+	if (charsToInt[wj] == 0) {
+	  charsToInt[wj] = maxChars;
+	  intToChars[maxChars] = wj;
+	  maxChars++;
+	}
+	j += UTF8Len(word[j]);
+      }
+    }
+    index = wordsToInt[word];
+    training_vocab.insert(index);
+    counts[index]++;
+
+  }
+  vocFile.close();
+  for (auto wc : counts)
+    if (wc.second == 1) singletons.insert(wc.first);
+}
+
 
 inline void load_correct_actions(std::string file){
 
+  correct_act_sent.clear();
+  sentences.clear();
+  sentencesPos.clear();
+
   std::ifstream actionsFile(file);
-  //correct_act_sent=new vector<vector<unsigned>>();
   std::string lineS;
 
   int count=-1;
   int sentence=-1;
   bool initial=false;
   bool first=true;
-  wordsToInt[Corpus::BAD0] = 0;
-  intToWords[0] = Corpus::BAD0;
-  wordsToInt[Corpus::UNK] = 1; // unknown symbol
-  intToWords[1] = Corpus::UNK;
-  assert(max == 0);
-  assert(maxPos == 0);
-  max=2;
-  maxPos=1;
+  assert(max != 0);
+  assert(maxPos != 0);
 
-  charsToInt[BAD0]=1;
-  intToChars[1]="BAD0";
-  maxChars=1;
-
-	std::vector<unsigned> current_sent;
+  std::vector<unsigned> current_sent;
   std::vector<unsigned> current_sent_pos;
+
   while (getline(actionsFile, lineS)){
     //istringstream iss(line);
     //string lineS;
@@ -173,6 +239,7 @@ inline void load_correct_actions(std::string file){
           word = word.substr(0, posIndex);
           // new POS tag
           if (posToInt[pos] == 0) {
+	    std::cerr << "NEW_POS:" << pos << std::endl;
             posToInt[pos] = maxPos;
             intToPos[maxPos] = pos;
             npos = maxPos;
@@ -181,6 +248,7 @@ inline void load_correct_actions(std::string file){
 
           // new word
           if (wordsToInt[word] == 0) {
+	    std::cerr << "NEW_WORD:" << word << std::endl;
             wordsToInt[word] = max;
             intToWords[max] = word;
             nwords = max;
@@ -239,29 +307,9 @@ inline void load_correct_actions(std::string file){
 
   actionsFile.close();
 
-  /* std::string oov="oov"; */
-  /* posToInt[oov]=maxPos; */
-  /* intToPos[maxPos]=oov; */
-  /* npos=maxPos; */
-  /* maxPos++; */
-  /* wordsToInt[oov]=max; */
-  /* intToWords[max]=oov; */
-  /* nwords=max; */
-  /* max++; */
-
-  nactions=actions.size();
-  //std::cerr<<"nactions:"<<nactions<<"\n";
-
-  //std::cerr<<"done"<<"\n";
-  /* for (auto a: actions) { */
-  /*   std::cerr<<a<<"\n"; */
-  /* } */
-  //std::cerr<<"nwords:"<<nwords<<"\n";
-  //  std::cerr<<"npos:"<<npos<<"\n";
-  /* for (unsigned i=0;i<npos;i++){ */
-  /*   std::cerr<<i<<":"<<intToPos[i]<<"\n"; */
-  /* } */
-
+  std::cerr<<"# of w:"<<nwords<<"\n";
+  std::cerr<<"# of a:"<<nactions<<"\n";
+  std::cerr<<"# of p:"<<npos<<"\n";
 }
 
 inline unsigned get_or_add_word(const std::string& word) {
