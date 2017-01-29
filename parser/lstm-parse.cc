@@ -29,9 +29,13 @@
 
 cpyp::Corpus corpus;
 volatile bool requested_stop = false;
-unsigned LAYERS = 2;
+
+std::string ROOT_FOLDER;
 unsigned PATIENCE = 10;
-std::string ROOT;
+unsigned REGIMEN = 1;
+unsigned EPOCHS = 10;
+
+unsigned LAYERS = 2;
 unsigned INPUT_DIM = 40;
 unsigned HIDDEN_DIM = 60;
 unsigned ACTION_DIM = 36;
@@ -57,30 +61,34 @@ namespace po = boost::program_options;
 vector<unsigned> possible_actions;
 unordered_map<unsigned, vector<float>> pretrained;
 
+
 void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
   po::options_description opts("Configuration options");
   opts.add_options()
-        ("training_data,T", po::value<string>(), "List of Transitions - Training corpus")
-        ("dev_data,d", po::value<string>(), "Development corpus")
-        ("test_data,p", po::value<string>(), "Test corpus")
-        ("actions_data,a", po::value<string>(), "list of all actions")
-        ("output_root,r", po::value<string>(), "output root folder to dump files")
-        ("unk_strategy,o", po::value<unsigned>()->default_value(1), "Unknown word strategy: 1 = singletons become UNK with probability unk_prob")
-        ("unk_prob,u", po::value<double>()->default_value(0.2), "Probably with which to replace singletons with UNK in training data")
-        ("model,m", po::value<string>(), "Load saved model from this file")
-        ("use_pos_tags,P", "make POS tags visible to parser")
-        ("layers", po::value<unsigned>()->default_value(2), "number of LSTM layers")
-        ("patience", po::value<unsigned>()->default_value(10), "# of epochs before stopping training")
-        ("action_dim", po::value<unsigned>()->default_value(16), "action embedding size")
-        ("input_dim", po::value<unsigned>()->default_value(32), "input embedding size")
-        ("hidden_dim", po::value<unsigned>()->default_value(64), "hidden dimension")
-        ("pretrained_dim", po::value<unsigned>()->default_value(50), "pretrained input dimension")
-        ("pos_dim", po::value<unsigned>()->default_value(12), "POS dimension")
-        ("rel_dim", po::value<unsigned>()->default_value(10), "relation dimension")
-        ("lstm_input_dim", po::value<unsigned>()->default_value(60), "LSTM input dimension")
-        ("train,t", "Should training be run?")
-        ("words,w", po::value<string>(), "Pretrained word embeddings")
-        ("help,h", "Help");
+    ("training_data,T", po::value<string>()->required(), "List of Transitions - Training corpus")
+    ("dev_data,d", po::value<string>(), "Development corpus")
+    ("test_data,p", po::value<string>()->required(), "Test corpus")
+    ("actions_data,a", po::value<string>()->required(), "list of all actions")
+    ("output_root,r", po::value<string>()->required(), "output root folder to dump files")
+    ("curriculum,c", po::value<unsigned>()->default_value(1), "curriculum strategy: 1-vanilla(random) 2-sorted 3-onepass 4-babystep, default 1")
+    ("epochs,e", po::value<unsigned>()->default_value(10), "number of epochs, default = 10")
+
+    ("unk_strategy,o", po::value<unsigned>()->default_value(1), "Unknown word strategy: 1 = singletons become UNK with probability unk_prob")
+    ("unk_prob,u", po::value<double>()->default_value(0.2), "Probably with which to replace singletons with UNK in training data")
+    ("model,m", po::value<string>(), "Load saved model from this file")
+    ("use_pos_tags,P", "make POS tags visible to parser")
+    ("layers", po::value<unsigned>()->default_value(2), "number of LSTM layers")
+    ("patience", po::value<unsigned>()->default_value(10), "# of epochs before stopping training")
+    ("action_dim", po::value<unsigned>()->default_value(16), "action embedding size")
+    ("input_dim", po::value<unsigned>()->default_value(32), "input embedding size")
+    ("hidden_dim", po::value<unsigned>()->default_value(64), "hidden dimension")
+    ("pretrained_dim", po::value<unsigned>()->default_value(50), "pretrained input dimension")
+    ("pos_dim", po::value<unsigned>()->default_value(12), "POS dimension")
+    ("rel_dim", po::value<unsigned>()->default_value(10), "relation dimension")
+    ("lstm_input_dim", po::value<unsigned>()->default_value(60), "LSTM input dimension")
+    ("train,t", "Should training be run?")
+    ("words,w", po::value<string>(), "Pretrained word embeddings")
+    ("help,h", "Help");
   po::options_description dcmdline_options;
   dcmdline_options.add(opts);
   po::store(parse_command_line(argc, argv, dcmdline_options), *conf);
@@ -89,7 +97,31 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
     exit(1);
   }
   if (conf->count("training_data") == 0) {
-    cerr << "Please specify --traing_data (-T): this is required to determine the vocabulary mapping, even if the parser is used in prediction mode.\n";
+      cerr << "Please specify a folder for --training_data (-T): this is required during training and prediction\n";
+      exit(1);
+  }
+  else{
+    std::string trn_root;
+    trn_root = (*conf)["training_data"].as<string>();
+    if(trn_root[trn_root.size()-1] != '/'){
+      cerr << "Please specify a folder for --training_data (-T): this is required during training and prediction\n";
+      exit(1);
+    }
+  }
+  if (conf->count("test_data") == 0) {
+    cerr << "Please specify --test_data (-p): this is required.\n";
+    exit(1);
+  }
+  if (conf->count("actions_data") == 0) {
+    cerr << "Please specify --actions_data (-a): this is required.\n";
+    exit(1);
+  }
+  if (conf->count("output_root") == 0) {
+    cerr << "Please specify --output_root (-r): this is required.\n";
+    exit(1);
+  }
+  if (conf->count("dev_data") == 0 && conf->count("train")) {
+    cerr << "Please specify --dev_data (-d): this is required during training\n";
     exit(1);
   }
 }
@@ -498,6 +530,7 @@ void output_conll(const vector<unsigned>& sentence, const vector<unsigned>& pos,
   outputFile << endl;
 }
 
+void predict(ofstream& testConllFile, ParserBuilder& parser, cpyp::Corpus& corpus, set<unsigned>& training_vocab, po::variables_map& conf, bool conll_option, bool dev_option);
 
 int main(int argc, char** argv) {
   cnn::Initialize(argc, argv);
@@ -509,9 +542,12 @@ int main(int argc, char** argv) {
 
   po::variables_map conf;
   InitCommandLine(argc, argv, &conf);
-  ROOT = conf["output_root"].as<string>();
-  USE_POS = conf.count("use_pos_tags");
+  ROOT_FOLDER = conf["output_root"].as<string>();
   PATIENCE = conf["patience"].as<unsigned>();
+  REGIMEN = conf["curriculum"].as<unsigned>();
+  EPOCHS = conf["epochs"].as<unsigned>();
+
+  USE_POS = conf.count("use_pos_tags");
   LAYERS = conf["layers"].as<unsigned>();
   INPUT_DIM = conf["input_dim"].as<unsigned>();
   PRETRAINED_DIM = conf["pretrained_dim"].as<unsigned>();
@@ -530,29 +566,33 @@ int main(int argc, char** argv) {
   const double unk_prob = conf["unk_prob"].as<double>();
   assert(unk_prob >= 0.); assert(unk_prob <= 1.);
 
-  stringstream dir_root, param_file, file_root, dev_out_file;
-  dir_root << "test -e " << ROOT << " | mkdir -p " << ROOT;
-  system(dir_root.str().c_str());
-  cerr<< "Directory Created: "<< ROOT <<std::endl;
+  stringstream dir_root, param_file, file_root, dev_out_file, test_out_file, log_file;
 
-
-  file_root << ROOT << "/"
-     <<"parser_" << (USE_POS ? "pos" : "nopos")
-     << '_' << LAYERS
-     << '_' << INPUT_DIM
-     << '_' << HIDDEN_DIM
-     << '_' << ACTION_DIM
-     << '_' << LSTM_INPUT_DIM
-     << '_' << POS_DIM
-     << '_' << REL_DIM
+  file_root << ROOT_FOLDER << "/"
+     <<"parser_POS" << (USE_POS ? "pos" : "nopos")
+     << "_R" << REGIMEN
+     << "_L" << LAYERS
+     << "_ID" << INPUT_DIM
+     << "_HD" << HIDDEN_DIM
+     << "_AD" << ACTION_DIM
+     << "_LID" << LSTM_INPUT_DIM
+     << "_PD" << POS_DIM
+     << "_RD" << REL_DIM
      << "-pid" << getpid() << ".";
   param_file << file_root.str() + "params";
+  log_file << file_root.str() + "log";
+
   int best_correct_heads = 0;
   const string fname = param_file.str();
+
   cerr << "Writing parameters to file: " << fname << endl;
   bool softlinkCreated = false;
   corpus.load_all_actions(conf["actions_data"].as<string>());
-  corpus.load_correct_actions(conf["training_data"].as<string>());
+  cerr << "loading training data from : " << conf["training_data"].as<string>() + "trn.oracle" << endl;
+  corpus.load_correct_actions(conf["training_data"].as<string>() + "trn.oracle");
+  //  cerr << "loading training data from : " << conf["training_data"].as<string>() << endl;
+  //  corpus.load_correct_actions(conf["training_data"].as<string>());
+
   const unsigned kUNK = corpus.get_or_add_word(cpyp::Corpus::UNK);
   kROOT_SYMBOL = corpus.get_or_add_word(ROOT_SYMBOL);
 
@@ -608,10 +648,16 @@ int main(int argc, char** argv) {
     SimpleSGDTrainer sgd(&model);
     //MomentumSGDTrainer sgd(&model);
     sgd.eta_decay = 0.08;
-    //sgd.eta_decay = 0.05;
+
+    dir_root << "test -e " << ROOT_FOLDER << " | mkdir -p " << ROOT_FOLDER;
+    system(dir_root.str().c_str());
+    cerr<< "Directory Created: "<< ROOT_FOLDER <<std::endl;
+    ofstream logFile(log_file.str());
+
     vector<unsigned> order(corpus.nsentences);
     for (unsigned i = 0; i < corpus.nsentences; ++i)
       order[i] = i;
+
     double tot_seen = 0;
     status_every_i_iterations = corpus.nsentences;
     unsigned si = corpus.nsentences;
@@ -619,13 +665,16 @@ int main(int argc, char** argv) {
     unsigned trs = 0;
     double right = 0;
     double llh = 0;
+    double trn_err = 0;
+    double dev_uas = 0;
+
     bool first = true;
-    int iter = -1;
+    int iter = 1;
     time_t time_start = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-    cerr << "TRAINING STARTED AT: " << put_time(localtime(&time_start), "%c %Z") << endl;
-    int best_correct_heads = 0;
-    while(!requested_stop) {
-      ++iter;
+    cerr << "TRAINING STARTED AT: " << put_time(localtime(&time_start), "%c %Z") << " for " << EPOCHS << " epochs.."<<endl;
+    int best_uas = 0;
+
+    while(!requested_stop and iter <= EPOCHS) {
       for (unsigned sii = 0; sii < status_every_i_iterations; ++sii) {
            if (si == corpus.nsentences) {
              si = 0;
@@ -655,13 +704,15 @@ int main(int argc, char** argv) {
       }
       sgd.status();
       time_t time_now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-      cerr << "update #" << iter << " epoch " << (tot_seen / corpus.nsentences)  << " err: " << (trs - right) / trs << std::chrono::duration<double, std::milli>(time_now - time_start).count() << " ms]" << endl;
+
+      trn_err = (trs - right) / trs;
+      cerr << "update #" << iter << " epoch " << (tot_seen / corpus.nsentences)  << " err: " << trn_err << std::chrono::duration<double, std::milli>(time_now - time_start).count() << " ms]" << endl;
       llh = trs = right = 0;
 
       unsigned dev_size = corpus.nsentencesDev;
       double llh = 0;
-      double trs = 0;
-      double right = 0;
+      double dev_trs = 0;
+      double dev_right = 0;
       double correct_heads = 0;
       double total_heads = 0;
 
@@ -681,10 +732,10 @@ int main(int argc, char** argv) {
 	  if (training_vocab.count(w) == 0) w = kUNK;
 
 	ComputationGraph hg;
-	vector<unsigned> pred = parser.log_prob_parser(&hg,sentence,tsentence,sentencePos,vector<unsigned>(),corpus.actions,corpus.intToWords,&right);
+	vector<unsigned> pred = parser.log_prob_parser(&hg,sentence,tsentence,sentencePos,vector<unsigned>(),corpus.actions,corpus.intToWords,&dev_right);
 	double lp = 0;
 	llh -= lp;
-	trs += actions.size();
+	dev_trs += actions.size();
 
 	map<int, string> rel_ref, rel_hyp;
 	map<int,int> ref = parser.compute_heads(sentence.size(), actions, corpus.actions, &rel_ref);
@@ -696,10 +747,13 @@ int main(int argc, char** argv) {
       devConllFile.close();
       auto t_end = std::chrono::high_resolution_clock::now();
 
-      cerr << "--- dev iter=" << iter << " epoch=" << (tot_seen / corpus.nsentences) << " err: " << (trs - right) / trs << " uas: " << (correct_heads / total_heads) << "\t[" << dev_size << " sents in " << std::chrono::duration<double, std::milli>(t_end-t_start).count() << " ms]" << endl;
+      dev_uas = (correct_heads / total_heads);
 
-      if (correct_heads > best_correct_heads) {
-	best_correct_heads = correct_heads;
+      cerr << "--- dev iter=" << iter << " epoch=" << (tot_seen / corpus.nsentences) << " uas: " << dev_uas << "\t[" << dev_size << " sents in " << std::chrono::duration<double, std::milli>(t_end-t_start).count() << " ms]" << endl;
+      logFile << "epoch=" << (tot_seen / corpus.nsentences) << "\ttrn_err:" << trn_err <<"\tval_uas:" << dev_uas << endl;
+
+      if (dev_uas > best_uas) {
+	best_uas = dev_uas;
 	patience = -1;
 	ofstream out(fname);
 	boost::archive::text_oarchive oa(out);
@@ -715,26 +769,50 @@ int main(int argc, char** argv) {
 	  }
 	  softlinkCreated = true;
 	}
-	patience++;
-	if (patience == PATIENCE){
-	  cerr << "no improvement in " << PATIENCE << " epochs. stopping training..." << endl;
-	  break;
-	}
       }
+      patience++;
+      if (patience == PATIENCE){
+	cerr << "no improvement in " << PATIENCE << " epochs. stopping training..." << endl;
+	break;
+      }
+      ++iter;
     }
+    logFile.close();
+    test_out_file << file_root.str() << "dev.pred.conll";
+    ofstream devConllFile(test_out_file.str());
+    predict(devConllFile, parser, corpus, training_vocab, conf, true, false);
   } // should do training?
-  if (true) { // do test evaluation
+  test_out_file.str("");
+  test_out_file << file_root.str() << "test.pred.conll";
+  ofstream testConllFile(test_out_file.str());
+  predict(testConllFile, parser, corpus, training_vocab, conf, true, true);
+}
+
+void predict(ofstream& testConllFile, ParserBuilder& parser, cpyp::Corpus& corpus, set<unsigned>& training_vocab, po::variables_map& conf, bool conll_option, bool dev_option){
+
+  if(dev_option){
+    cerr << conf["test_data"].as<string>() << " is loading for prediction..." << endl;
+    corpus.load_correct_actionsDev(conf["test_data"].as<string>());
+  }
+  else{
+    cerr << conf["dev_data"].as<string>() << " is loading for prediction..." << endl;
+    corpus.load_correct_actionsDev(conf["dev_data"].as<string>());
+  }
+
+
     double llh = 0;
     double trs = 0;
     double right = 0;
     double correct_heads = 0;
     double total_heads = 0;
+    const unsigned kUNK = corpus.get_or_add_word(cpyp::Corpus::UNK);
+
     auto t_start = std::chrono::high_resolution_clock::now();
     unsigned corpus_size = corpus.nsentencesDev;
     for (unsigned sii = 0; sii < corpus_size; ++sii) {
       const vector<unsigned>& sentence=corpus.sentencesDev[sii];
-      const vector<unsigned>& sentencePos=corpus.sentencesPosDev[sii]; 
-      const vector<string>& sentenceUnkStr=corpus.sentencesStrDev[sii]; 
+      const vector<unsigned>& sentencePos=corpus.sentencesPosDev[sii];
+      const vector<string>& sentenceUnkStr=corpus.sentencesStrDev[sii];
       const vector<unsigned>& actions=corpus.correct_act_sentDev[sii];
       vector<unsigned> tsentence=sentence;
       for (auto& w : tsentence)
@@ -748,15 +826,12 @@ int main(int argc, char** argv) {
       map<int, string> rel_ref, rel_hyp;
       map<int,int> ref = parser.compute_heads(sentence.size(), actions, corpus.actions, &rel_ref);
       map<int,int> hyp = parser.compute_heads(sentence.size(), pred, corpus.actions, &rel_hyp);
-      output_conll(sentence, sentencePos, sentenceUnkStr, corpus.intToWords, corpus.intToPos, hyp, rel_hyp, cerr, false);
+      output_conll(sentence, sentencePos, sentenceUnkStr, corpus.intToWords, corpus.intToPos, hyp, rel_hyp, testConllFile, conll_option);
       correct_heads += compute_correct(ref, hyp, sentence.size() - 1);
       total_heads += sentence.size() - 1;
     }
     auto t_end = std::chrono::high_resolution_clock::now();
-    cerr << "TEST llh=" << llh << " ppl: " << exp(llh / trs) << " err: " << (trs - right) / trs << " uas: " << (correct_heads / total_heads) << "\t[" << corpus_size << " sents in " << std::chrono::duration<double, std::milli>(t_end-t_start).count() << " ms]" << endl;
-  }
-  for (unsigned i = 0; i < corpus.actions.size(); ++i) {
-    //cerr << corpus.actions[i] << '\t' << parser.p_r->values[i].transpose() << endl;
-    //cerr << corpus.actions[i] << '\t' << parser.p_p2a->values.col(i).transpose() << endl;
-  }
+    cerr << "llh=" << llh << " ppl: " << exp(llh / trs) << " err: " << (trs - right) / trs << " uas: " << (correct_heads / total_heads) << "\t[" << corpus_size << " sents in " << std::chrono::duration<double, std::milli>(t_end-t_start).count() << " ms]" << endl;
+    cerr << "prediction is done." << endl;
+    testConllFile.close();
 }
