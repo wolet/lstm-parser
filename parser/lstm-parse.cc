@@ -101,15 +101,21 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
     cerr << dcmdline_options << endl;
     exit(1);
   }
-  if (conf->count("training_data") == 0) {
-      cerr << "Please specify a folder for --training_data (-T): this is required during training and prediction\n";
+  if(conf->count("train")){
+    if (conf->count("training_data") == 0) {
+      cerr << "Please specify a folder for --training_data (-T): this is required during training\n";
       exit(1);
-  }
-  else{
-    std::string trn_root;
-    trn_root = (*conf)["training_data"].as<string>();
-    if(trn_root[trn_root.size()-1] != '/'){
-      cerr << "Please specify a folder for --training_data (-T): this is required during training and prediction\n";
+    }
+    else{
+      std::string trn_root;
+      trn_root = (*conf)["training_data"].as<string>();
+      if(trn_root[trn_root.size()-1] != '/'){
+	cerr << "Please specify a folder for --training_data (-T): this is required during training and prediction\n";
+	exit(1);
+      }
+    }
+    if (conf->count("dev_data") == 0) {
+      cerr << "Please specify --dev_data (-d): this is required during training\n";
       exit(1);
     }
   }
@@ -131,10 +137,6 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
   }
   if (conf->count("output_root") == 0) {
     cerr << "Please specify --output_root (-r): this is required.\n";
-    exit(1);
-  }
-  if (conf->count("dev_data") == 0 && conf->count("train")) {
-    cerr << "Please specify --dev_data (-d): this is required during training\n";
     exit(1);
   }
 }
@@ -584,23 +586,34 @@ int main(int argc, char** argv) {
   // handle filenames
   stringstream dir_root, param_file, file_root, dev_out_file, test_out_file, log_file;
 
-  file_root << ROOT_FOLDER << "/"
-     <<"parser_POS" << (USE_POS ? "pos" : "nopos")
-     << "_R" << REGIMEN
-     << "_L" << LAYERS
-     << "_ID" << INPUT_DIM
-     << "_HD" << HIDDEN_DIM
-     << "_AD" << ACTION_DIM
-     << "_LID" << LSTM_INPUT_DIM
-     << "_PD" << POS_DIM
-     << "_RD" << REL_DIM
-     << "-pid" << getpid() << ".";
+  if (conf.count("model")) {
+    string model_name=conf["model"].as<string>().c_str();
+    size_t posIndex = model_name.rfind('.');
+    if (posIndex == string::npos) {
+      cerr << "cant find the . in '" << model_name << "'" << endl;
+      exit(1);
+    }
+    file_root << model_name.substr(0, posIndex) << ".";
+  }
+  else{
+    file_root << ROOT_FOLDER << "/"
+	      <<"parser_POS" << (USE_POS ? "pos" : "nopos")
+	      << "_R" << REGIMEN
+	      << "_L" << LAYERS
+	      << "_ID" << INPUT_DIM
+	      << "_HD" << HIDDEN_DIM
+	      << "_AD" << ACTION_DIM
+	      << "_LID" << LSTM_INPUT_DIM
+	      << "_PD" << POS_DIM
+	      << "_RD" << REL_DIM
+	      << "-pid" << getpid() << ".";
+  }
   param_file << file_root.str() + "params";
   log_file << file_root.str() + "log";
 
   const string fname = param_file.str();
 
-  cerr << "Will be Writing stuff to file: " << file_root.str() << "*" << endl;
+  cerr << "Will be Writing stuff to files: " << file_root.str() << "*" << endl;
 
   corpus.load_all_pos(conf["pos_data"].as<string>());
   corpus.load_all_voc(conf["vocabulary_data"].as<string>());
@@ -650,10 +663,6 @@ int main(int argc, char** argv) {
   }
 
   //TRAINING
-  cerr << "loading training data from : " << conf["training_data"].as<string>() + "trn.oracle" << endl;
-  corpus.load_correct_actions(conf["training_data"].as<string>() + "trn.oracle");
-  corpus.load_correct_actionsDev(conf["dev_data"].as<string>());
-
   static unsigned patience = 0;
   if (conf.count("train")) {
     signal(SIGINT, signal_callback_handler);
@@ -666,123 +675,128 @@ int main(int argc, char** argv) {
     cerr<< "Directory Created: "<< ROOT_FOLDER <<std::endl;
     ofstream logFile(log_file.str());
 
-    vector<unsigned> order(corpus.nsentences);
-    for (unsigned i = 0; i < corpus.nsentences; ++i)
-      order[i] = i;
-
-    double tot_seen = 0;
-    status_every_i_iterations = corpus.nsentences;
-    unsigned si = corpus.nsentences;
-    cerr << "NUMBER OF TRAINING SENTENCES: " << corpus.nsentences << endl;
-    unsigned trs = 0;
-    double right = 0;
-    double llh = 0;
-    double trn_err = 0;
-    double dev_uas = 0;
-
     bool first = true;
-    unsigned iter = 1;
-    time_t time_start = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-    cerr << "TRAINING bucket " << bucket <<" STARTED AT: " << put_time(localtime(&time_start), "%c %Z") << " for " << EPOCHS << " epochs.."<<endl;
     int best_uas = 0;
+    cerr << "loading training data from : " << conf["training_data"].as<string>() << bucket2suffix[bucket] + "trn.oracle" << endl;
+    corpus.load_correct_actions(conf["training_data"].as<string>() + bucket2suffix[bucket] + "trn.oracle");
+    corpus.load_correct_actionsDev(conf["dev_data"].as<string>());
 
-    while(!requested_stop and iter <= EPOCHS) {
-      for (unsigned sii = 0; sii < status_every_i_iterations; ++sii) {
-           if (si == corpus.nsentences) {
-             si = 0;
-             if (first) { first = false; } else { sgd.update_epoch(); }
-           }
-           tot_seen += 1;
-           const vector<unsigned>& sentence=corpus.sentences[order[si]];
-           vector<unsigned> tsentence=sentence;
-           if (unk_strategy == 1) {
-             for (auto& w : tsentence)
-               if (corpus.singletons.count(w) && cnn::rand01() < unk_prob) w = kUNK;
-           }
-	   const vector<unsigned>& sentencePos=corpus.sentencesPos[order[si]];
-	   const vector<unsigned>& actions=corpus.correct_act_sent[order[si]];
-           ComputationGraph hg;
-           parser.log_prob_parser(&hg,sentence,tsentence,sentencePos,actions,corpus.actions,corpus.intToWords,&right);
-           double lp = as_scalar(hg.incremental_forward());
-           if (lp < 0) {
-             cerr << "Log prob < 0 on sentence " << order[si] << ": lp=" << lp << endl;
-             assert(lp >= 0.0);
-           }
-           hg.backward();
-           sgd.update(1.0);
-           llh += lp;
+    while(true){
+
+      vector<unsigned> order(corpus.nsentences);
+      for (unsigned i = 0; i < corpus.nsentences; ++i)
+	order[i] = i;
+
+      double tot_seen = 0;
+      status_every_i_iterations = corpus.nsentences;
+      unsigned si = corpus.nsentences;
+      cerr << "# of training sentences for bucket" << bucket << ":" << corpus.nsentences << endl;
+      unsigned trs = 0;
+      double right = 0;
+      double llh = 0;
+      double trn_err = 0;
+      double dev_uas = 0;
+      unsigned iter = 1;
+
+      time_t time_start = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+      cerr << "TRAINING bucket " << bucket <<" STARTED AT: " << put_time(localtime(&time_start), "%c %Z") << " for " << EPOCHS << " epochs.."<<endl;
+
+      while(!requested_stop and iter <= EPOCHS) {
+	for (unsigned sii = 0; sii < status_every_i_iterations; ++sii) {
+	  if (si == corpus.nsentences) {
+	    si = 0;
+	    if (first) { first = false; } else { sgd.update_epoch(); }
+	  }
+	  tot_seen += 1;
+	  const vector<unsigned>& sentence=corpus.sentences[order[si]];
+	  vector<unsigned> tsentence=sentence;
+	  if (unk_strategy == 1) {
+	    for (auto& w : tsentence)
+	      if (corpus.singletons.count(w) && cnn::rand01() < unk_prob) w = kUNK;
+	  }
+	  const vector<unsigned>& sentencePos=corpus.sentencesPos[order[si]];
+	  const vector<unsigned>& actions=corpus.correct_act_sent[order[si]];
+	  ComputationGraph hg;
+	  parser.log_prob_parser(&hg,sentence,tsentence,sentencePos,actions,corpus.actions,corpus.intToWords,&right);
+	  double lp = as_scalar(hg.incremental_forward());
+	  if (lp < 0) {
+	    cerr << "Log prob < 0 on sentence " << order[si] << ": lp=" << lp << endl;
+	    assert(lp >= 0.0);
+	  }
+	  hg.backward();
+	  sgd.update(1.0);
+	  llh += lp;
            ++si;
            trs += actions.size();
-      }
-      sgd.status();
-      time_t time_now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+	}
+	sgd.status();
+	time_t time_now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
 
-      trn_err = (trs - right) / trs;
-      cerr << "update #" << iter << " epoch " << (tot_seen / corpus.nsentences)  << " err: " << trn_err << std::chrono::duration<double, std::milli>(time_now - time_start).count() << " ms]" << endl;
-      llh = trs = right = 0;
+	trn_err = (trs - right) / trs;
+	cerr << "bucket:"<< bucket << " epoch:" << (tot_seen / corpus.nsentences)  << " err:" << trn_err << " in "<<std::chrono::duration<double, std::milli>(time_now - time_start).count() << " ms" << endl;
+	llh = trs = right = 0;
 
-      unsigned dev_size = corpus.nsentencesDev;
-      double llh = 0;
-      double dev_trs = 0;
-      double dev_right = 0;
-      double correct_heads = 0;
-      double total_heads = 0;
+	unsigned dev_size = corpus.nsentencesDev;
+	double llh = 0;
+	double dev_trs = 0;
+	double dev_right = 0;
+	double correct_heads = 0;
+	double total_heads = 0;
 
+	dev_out_file << file_root.str() << "dev." << bucket << "." << iter ;
+	const string dev_fname = dev_out_file.str();
+	ofstream devConllFile(dev_fname);
 
-      dev_out_file << file_root.str() << "dev." << iter;
-      const string dev_fname = dev_out_file.str();
-      ofstream devConllFile(dev_fname);
+	auto t_start = std::chrono::high_resolution_clock::now();
+	for (unsigned sii = 0; sii < dev_size; ++sii) {
+	  const vector<unsigned>& sentence=corpus.sentencesDev[sii];
+	  const vector<unsigned>& sentencePos=corpus.sentencesPosDev[sii]; 
+	  const vector<unsigned>& actions=corpus.correct_act_sentDev[sii];
+	  const vector<string>& sentenceUnkStr=corpus.sentencesStrDev[sii];  //
+	  vector<unsigned> tsentence=sentence;
+	  for (auto& w : tsentence)
+	    if (corpus.training_vocab.count(w) == 0) w = kUNK;
 
-      auto t_start = std::chrono::high_resolution_clock::now();
-      for (unsigned sii = 0; sii < dev_size; ++sii) {
-	const vector<unsigned>& sentence=corpus.sentencesDev[sii];
-	const vector<unsigned>& sentencePos=corpus.sentencesPosDev[sii]; 
-	const vector<unsigned>& actions=corpus.correct_act_sentDev[sii];
-	const vector<string>& sentenceUnkStr=corpus.sentencesStrDev[sii];  //
-	vector<unsigned> tsentence=sentence;
-	for (auto& w : tsentence)
-	  if (corpus.training_vocab.count(w) == 0) w = kUNK;
+	  ComputationGraph hg;
+	  vector<unsigned> pred = parser.log_prob_parser(&hg,sentence,tsentence,sentencePos,vector<unsigned>(),corpus.actions,corpus.intToWords,&dev_right);
+	  double lp = 0;
+	  llh -= lp;
+	  dev_trs += actions.size();
 
-	ComputationGraph hg;
-	vector<unsigned> pred = parser.log_prob_parser(&hg,sentence,tsentence,sentencePos,vector<unsigned>(),corpus.actions,corpus.intToWords,&dev_right);
-	double lp = 0;
-	llh -= lp;
-	dev_trs += actions.size();
+	  map<int, string> rel_ref, rel_hyp;
+	  map<int,int> ref = parser.compute_heads(sentence.size(), actions, corpus.actions, &rel_ref);
+	  map<int,int> hyp = parser.compute_heads(sentence.size(), pred, corpus.actions, &rel_hyp);
+	  output_conll(sentence, sentencePos, sentenceUnkStr, corpus.intToWords, corpus.intToPos, hyp, rel_hyp, devConllFile, false);
+	  correct_heads += compute_correct(ref, hyp, sentence.size() - 1);
+	  total_heads += sentence.size() - 1;
+	}
+	devConllFile.close();
+	dev_out_file.str("");
+	auto t_end = std::chrono::high_resolution_clock::now();
+	dev_uas = (correct_heads / total_heads);
 
-	map<int, string> rel_ref, rel_hyp;
-	map<int,int> ref = parser.compute_heads(sentence.size(), actions, corpus.actions, &rel_ref);
-	map<int,int> hyp = parser.compute_heads(sentence.size(), pred, corpus.actions, &rel_hyp);
-	output_conll(sentence, sentencePos, sentenceUnkStr, corpus.intToWords, corpus.intToPos, hyp, rel_hyp, devConllFile, false);
-	correct_heads += compute_correct(ref, hyp, sentence.size() - 1);
-	total_heads += sentence.size() - 1;
-      }
-      devConllFile.close();
-      auto t_end = std::chrono::high_resolution_clock::now();
+	cerr << "--- dev bucket" << bucket << " iter=" << iter << " epoch=" << (tot_seen / corpus.nsentences) << " uas: " << dev_uas << "\t[" << dev_size << " sents in " << std::chrono::duration<double, std::milli>(t_end-t_start).count() << " ms]" << endl;
+	logFile << "bucket=" << bucket << " epoch=" << (tot_seen / corpus.nsentences) << "\ttrn_err:" << trn_err <<"\tval_uas:" << dev_uas << endl;
 
-      dev_uas = (correct_heads / total_heads);
-
-      cerr << "--- dev iter=" << iter << " epoch=" << (tot_seen / corpus.nsentences) << " uas: " << dev_uas << "\t[" << dev_size << " sents in " << std::chrono::duration<double, std::milli>(t_end-t_start).count() << " ms]" << endl;
-      logFile << "epoch=" << (tot_seen / corpus.nsentences) << "\ttrn_err:" << trn_err <<"\tval_uas:" << dev_uas << endl;
-
-      if (dev_uas > best_uas) {
-	best_uas = dev_uas;
-	patience = -1;
-	ofstream out(fname);
-	boost::archive::text_oarchive oa(out);
-	oa << model;
+	if (dev_uas > best_uas) {
+	  best_uas = dev_uas;
+	  patience = -1;
+	  ofstream out(fname);
+	  boost::archive::text_oarchive oa(out);
+	  oa << model;
 	}
 	patience++;
 	if (patience == PATIENCE){
-	  cerr << "no improvement in " << PATIENCE << " epochs. stopping training..." << endl;
+	  cerr << "no improvement in " << PATIENCE << " epochs. stopping..." << endl;
 	  break;
 	}
 	++iter;
       }
-    //      bucket++;
-    //  if(bucket >= n_buckets) break;
-    //  cerr << "loading training data from : " << conf["training_data"].as<string>() << bucket2suffix[bucket] + "trn.oracle" << endl;
-  // OOV words will be replaced by UNK tokens
-    //   corpus.load_correct_actions(conf["training_data"].as<string>() + bucket2suffix[bucket] + "trn.oracle");
+      bucket++;
+      if(bucket >= n_buckets) break;
+      cerr << "loading training data from : " << conf["training_data"].as<string>() << bucket2suffix[bucket] + "trn.oracle" << endl;
+      corpus.load_correct_actions(conf["training_data"].as<string>() + bucket2suffix[bucket] + "trn.oracle");
+    }
     logFile.close();
     test_out_file << file_root.str() << "dev.pred.conll";
     ofstream devConllFile(test_out_file.str());

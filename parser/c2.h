@@ -307,9 +307,9 @@ inline void load_correct_actions(std::string file){
 
   actionsFile.close();
 
-  std::cerr<<"# of w:"<<nwords<<"\n";
-  std::cerr<<"# of a:"<<nactions<<"\n";
-  std::cerr<<"# of p:"<<npos<<"\n";
+  /* std::cerr<<"# of w:"<<nwords<<"\n"; */
+  /* std::cerr<<"# of a:"<<nactions<<"\n"; */
+  /* std::cerr<<"# of p:"<<npos<<"\n"; */
 }
 
 inline unsigned get_or_add_word(const std::string& word) {
