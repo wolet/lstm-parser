@@ -304,7 +304,7 @@ inline void load_correct_actions(std::string file){
     sentence++;
     nsentences = sentence;
   }
-
+  std::cerr << "SENTENCE : " << sentence << "\n";
   actionsFile.close();
 
   /* std::cerr<<"# of w:"<<nwords<<"\n"; */
