@@ -32,7 +32,7 @@ do
 	 training_data=$data_root/cl/$n/random/$seed/
 	 options=$parser
 	 curriculum=1
-	 output_root=$exp_root/data_size/$n/$curriculum
+	 output_root=$exp_root/data_size/$n/$curriculum/$seed/
 	 for var in layers input_dim hidden_dim pretrained_dim rel_dim pos_dim lstm_input_dim training_data dev_data test_data actions_data pos_data vocabulary_data epochs words curriculum output_root
 	 do
 	     options="$options --$var ${!var}"
@@ -91,7 +91,7 @@ do
 	    training_data=$data_root/cl/$n/random/$seed/
 	    options=$parser
 	    curriculum=1
-	    output_root=$exp_root/model_size/$n/$curriculum
+	    output_root=$exp_root/model_size/$n/$curriculum/$seed/
 	    for var in layers input_dim hidden_dim pretrained_dim rel_dim pos_dim lstm_input_dim training_data dev_data test_data actions_data pos_data vocabulary_data epochs words curriculum output_root
 	    do
 		options="$options --$var ${!var}"
